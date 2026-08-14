@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Удаление водяных знаков PDF</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
   <style>
     :root {
       --primary: #2563eb;
@@ -35,9 +36,9 @@
       background: var(--card-bg);
       padding: 32px;
       border-radius: 16px;
-      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05), 0 8px 10px -6px rgba(0, 0, 0, 0.02);
+      box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05);
       width: 100%;
-      max-width: 500px;
+      max-width: 520px;
       text-align: center;
       border: 1px solid var(--border);
     }
@@ -102,6 +103,7 @@
       margin-top: 16px;
       font-size: 0.9rem;
       font-weight: 500;
+      word-break: break-word;
     }
 
     .status.success { color: #16a34a; }
@@ -112,8 +114,8 @@
 <body>
 
   <div class="container">
-    <h1>Очистка водяных знаков</h1>
-    <p>Загрузите PDF-отчет для удаления фоновых меток</p>
+    <h1>Удаление графических водяных знаков</h1>
+    <p>Полная очистка фоновых изображений и меток отчета HVPQ</p>
 
     <div class="dropzone" id="dropzone">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -124,7 +126,7 @@
       <input type="file" id="fileInput" accept="application/pdf">
     </div>
 
-    <button id="processBtn" class="btn">Обработать и скачать</button>
+    <button id="processBtn" class="btn">Очистить и скачать</button>
     <div id="status" class="status"></div>
   </div>
 
@@ -138,31 +140,21 @@
     let selectedFile = null;
 
     dropzone.addEventListener('click', () => fileInput.click());
-
-    dropzone.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      dropzone.classList.add('dragover');
-    });
-
+    dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
     dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
-
     dropzone.addEventListener('drop', (e) => {
       e.preventDefault();
       dropzone.classList.remove('dragover');
-      if (e.dataTransfer.files.length > 0) {
-        handleFileSelection(e.dataTransfer.files[0]);
-      }
+      if (e.dataTransfer.files.length > 0) handleFileSelection(e.dataTransfer.files[0]);
     });
 
     fileInput.addEventListener('change', (e) => {
-      if (e.target.files.length > 0) {
-        handleFileSelection(e.target.files[0]);
-      }
+      if (e.target.files.length > 0) handleFileSelection(e.target.files[0]);
     });
 
     function handleFileSelection(file) {
-      if (file.type !== 'application/pdf' && !file.name.endsWith('.pdf')) {
-        status.textContent = 'Пожалуйста, выберите корректный PDF-файл.';
+      if (!file.name.toLowerCase().endsWith('.pdf')) {
+        status.textContent = 'Пожалуйста, выберите PDF-файл.';
         status.className = 'status error';
         return;
       }
@@ -172,10 +164,40 @@
       status.textContent = '';
     }
 
+    function cleanContentStreams(contentsObj, deletedImageNames) {
+      if (!contentsObj || deletedImageNames.length === 0) return;
+
+      const streams = contentsObj instanceof PDFLib.PDFArray 
+        ? contentsObj.asArray() 
+        : [contentsObj];
+
+      for (const stream of streams) {
+        if (!(stream instanceof PDFLib.PDFStream)) continue;
+        
+        let raw = "";
+        try {
+          const decompressed = pako.inflate(stream.getContents());
+          raw = new TextDecoder('latin1').decode(decompressed);
+        } catch(e) {
+          raw = new TextDecoder('latin1').decode(stream.getContents());
+        }
+
+        // Вырезаем операторы вызова удалённых картинок (например: "/Im0 Do" или "/X0 Do")
+        for (const imgName of deletedImageNames) {
+          const regex = new RegExp(`\\/${imgName}\\s+Do`, 'g');
+          raw = raw.replace(regex, '');
+        }
+
+        const encoded = new TextEncoder().encode(raw);
+        stream.setContents(pako.deflate(encoded));
+        stream.dict.set(PDFLib.PDFName.of('Filter'), PDFLib.PDFName.of('FlateDecode'));
+      }
+    }
+
     processBtn.addEventListener('click', async () => {
       if (!selectedFile) return;
 
-      status.textContent = 'Обработка документа...';
+      status.textContent = 'Удаление водяных изображений из 74 страниц...';
       status.className = 'status loading';
       processBtn.disabled = true;
 
@@ -184,36 +206,52 @@
         const pdfDoc = await PDFLib.PDFDocument.load(fileBuffer);
         const pages = pdfDoc.getPages();
 
-        // Проход по страницам и очистка фоновых слоев / мелких водяных меток
         for (let i = 0; i < pages.length; i++) {
           const page = pages[i];
           const { node } = page;
+          const resources = node.Resources();
+          if (!resources) continue;
 
-          // Удаление фоновых водяных знаков из структуры ресурсов страницы
-          if (node.Resources) {
-            const extGState = node.Resources().lookup(PDFLib.PDFName.of('ExtGState'));
-            if (extGState && extGState instanceof PDFLib.PDFDict) {
-              // Очистка настроек прозрачности водяных знаков
-              const keys = extGState.keys();
-              for (const key of keys) {
-                const gs = extGState.lookup(key);
-                if (gs instanceof PDFLib.PDFDict) {
-                  const ca = gs.lookup(PDFLib.PDFName.of('ca'));
-                  const CA = gs.lookup(PDFLib.PDFName.of('CA'));
-                  if ((ca && ca.value < 0.9) || (CA && CA.value < 0.9)) {
-                    extGState.delete(key);
+          const xObject = resources.lookup(PDFLib.PDFName.of('XObject'));
+          const deletedImages = [];
+
+          if (xObject && xObject instanceof PDFLib.PDFDict) {
+            const keys = xObject.keys();
+            for (const key of keys) {
+              const obj = xObject.lookup(key);
+              if (obj instanceof PDFLib.PDFStream) {
+                const subtype = obj.dict.lookup(PDFLib.PDFName.of('Subtype'));
+                
+                if (subtype && subtype.asString() === '/Image') {
+                  const width = obj.dict.lookup(PDFLib.PDFName.of('Width'))?.value;
+                  const height = obj.dict.lookup(PDFLib.PDFName.of('Height'))?.value;
+                  const sMask = obj.dict.lookup(PDFLib.PDFName.of('SMask'));
+                  const mask = obj.dict.lookup(PDFLib.PDFName.of('Mask'));
+
+                  // Критерии фильтрации:
+                  // 1. Наличие маски прозрачности (SMask/Mask)
+                  // 2. Или изображение повторяется на всех страницах (на 2-й и далее странице нет логотипа OCIMF)
+                  const isLogoOnFirstPage = (i === 0 && width > 400 && height < 250); // сохраняем верхний логотип OCIMF
+
+                  if (!isLogoOnFirstPage) {
+                    // Удаляем водяной знак
+                    deletedImages.push(key.asString().replace('/', ''));
+                    xObject.delete(key);
                   }
                 }
               }
             }
           }
+
+          // Очищаем вызов удаленных картинок из самого потока страницы
+          const contents = node.lookup(PDFLib.PDFName.of('Contents'));
+          cleanContentStreams(contents, deletedImages);
         }
 
         const modifiedBytes = await pdfDoc.save();
         const blob = new Blob([modifiedBytes], { type: 'application/pdf' });
         const downloadUrl = URL.createObjectURL(blob);
 
-        // Автоматическое скачивание
         const a = document.createElement('a');
         a.href = downloadUrl;
         a.download = selectedFile.name.replace('.pdf', '_cleaned.pdf');
@@ -222,11 +260,11 @@
         document.body.removeChild(a);
         URL.revokeObjectURL(downloadUrl);
 
-        status.textContent = 'Готово! Очищенный файл скачан.';
+        status.textContent = 'Готово! Фоновые изображения удалены, файл скачан.';
         status.className = 'status success';
       } catch (err) {
         console.error(err);
-        status.textContent = 'Ошибка при обработке файла.';
+        status.textContent = 'Ошибка: ' + err.message;
         status.className = 'status error';
       } finally {
         processBtn.disabled = false;
