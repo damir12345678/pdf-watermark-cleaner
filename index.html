@@ -115,7 +115,7 @@
 
   <div class="container">
     <h1>Удаление водяных знаков PDF</h1>
-    <p>Очистка фоновых водяных знаков из отчетов HVPQ</p>
+    <p>Очистка фоновых водяных знаков со страниц отчета HVPQ</p>
 
     <div class="dropzone" id="dropzone">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -165,7 +165,7 @@
     }
 
     function cleanContentStreams(contentsRef, deletedImageNames, context) {
-      if (!contentsRef || deletedImageNames.length === 0) return;
+      if (!contentsRef || deletedImageNames.length === 0) return null;
 
       const contentsObj = context.lookup(contentsRef);
       const streams = (contentsObj instanceof PDFLib.PDFArray) 
@@ -194,7 +194,6 @@
           const encoded = new TextEncoder().encode(modified);
           const compressed = pako.deflate(encoded);
           
-          // Создаем чистый новый поток и подменяем его в контексте
           const newStream = context.flateStream(compressed);
           if (contentsObj instanceof PDFLib.PDFArray) {
             contentsObj.set(i, newStream);
@@ -209,7 +208,7 @@
     processBtn.addEventListener('click', async () => {
       if (!selectedFile) return;
 
-      status.textContent = 'Удаление водяных знаков...';
+      status.textContent = 'Очистка документа (сохранение 1-й страницы и схем)...';
       status.className = 'status loading';
       processBtn.disabled = true;
 
@@ -220,6 +219,11 @@
         const context = pdfDoc.context;
 
         for (let i = 0; i < pages.length; i++) {
+          // ПЕРВАЯ СТРАНИЦА: пропускаем полностью, чтобы не трогать шапку и логотип
+          if (i === 0) {
+            continue;
+          }
+
           const page = pages[i];
           const { node } = page;
           const resourcesRef = node.get(PDFLib.PDFName.of('Resources'));
@@ -243,10 +247,10 @@
                   const width = obj.dict.get(PDFLib.PDFName.of('Width'))?.value;
                   const height = obj.dict.get(PDFLib.PDFName.of('Height'))?.value;
 
-                  // Сохраняем логотип OCIMF на 1-й странице (он крупный в шапке)
-                  const isLogoOnFirstPage = (i === 0 && width > 400 && height < 250);
+                  // Защита схем/чертежей (схемы танков обычно широкие > 600px)
+                  const isDiagram = (width > 600 && height > 200);
 
-                  if (!isLogoOnFirstPage) {
+                  if (!isDiagram) {
                     deletedImages.push(key.toString().replace('/', ''));
                     xObject.delete(key);
                   }
@@ -255,9 +259,9 @@
             }
           }
 
-          // Очищаем команды Do из Contents
+          // Очищаем вызовы только удаленных водяных знаков
           const contentsRef = node.get(PDFLib.PDFName.of('Contents'));
-          if (contentsRef) {
+          if (contentsRef && deletedImages.length > 0) {
             const newSingleStream = cleanContentStreams(contentsRef, deletedImages, context);
             if (newSingleStream) {
               node.set(PDFLib.PDFName.of('Contents'), newSingleStream);
@@ -277,7 +281,7 @@
         document.body.removeChild(a);
         URL.revokeObjectURL(downloadUrl);
 
-        status.textContent = 'Готово! Водяные знаки удалены, файл скачан.';
+        status.textContent = 'Готово! 1-я страница и схемы сохранены, водяные знаки удалены.';
         status.className = 'status success';
       } catch (err) {
         console.error(err);
