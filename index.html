@@ -114,8 +114,8 @@
 <body>
 
   <div class="container">
-    <h1>Удаление графических водяных знаков</h1>
-    <p>Полная очистка фоновых изображений и меток отчета HVPQ</p>
+    <h1>Удаление водяных знаков PDF</h1>
+    <p>Очистка фоновых водяных знаков из отчетов HVPQ</p>
 
     <div class="dropzone" id="dropzone">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -164,14 +164,16 @@
       status.textContent = '';
     }
 
-    function cleanContentStreams(contentsObj, deletedImageNames) {
-      if (!contentsObj || deletedImageNames.length === 0) return;
+    function cleanContentStreams(contentsRef, deletedImageNames, context) {
+      if (!contentsRef || deletedImageNames.length === 0) return;
 
-      const streams = contentsObj instanceof PDFLib.PDFArray 
+      const contentsObj = context.lookup(contentsRef);
+      const streams = (contentsObj instanceof PDFLib.PDFArray) 
         ? contentsObj.asArray() 
-        : [contentsObj];
+        : [contentsRef];
 
-      for (const stream of streams) {
+      for (let i = 0; i < streams.length; i++) {
+        const stream = context.lookup(streams[i]);
         if (!(stream instanceof PDFLib.PDFStream)) continue;
         
         let raw = "";
@@ -182,22 +184,32 @@
           raw = new TextDecoder('latin1').decode(stream.getContents());
         }
 
-        // Вырезаем операторы вызова удалённых картинок (например: "/Im0 Do" или "/X0 Do")
+        let modified = raw;
         for (const imgName of deletedImageNames) {
           const regex = new RegExp(`\\/${imgName}\\s+Do`, 'g');
-          raw = raw.replace(regex, '');
+          modified = modified.replace(regex, '');
         }
 
-        const encoded = new TextEncoder().encode(raw);
-        stream.setContents(pako.deflate(encoded));
-        stream.dict.set(PDFLib.PDFName.of('Filter'), PDFLib.PDFName.of('FlateDecode'));
+        if (modified !== raw) {
+          const encoded = new TextEncoder().encode(modified);
+          const compressed = pako.deflate(encoded);
+          
+          // Создаем чистый новый поток и подменяем его в контексте
+          const newStream = context.flateStream(compressed);
+          if (contentsObj instanceof PDFLib.PDFArray) {
+            contentsObj.set(i, newStream);
+          } else {
+            return newStream;
+          }
+        }
       }
+      return null;
     }
 
     processBtn.addEventListener('click', async () => {
       if (!selectedFile) return;
 
-      status.textContent = 'Удаление водяных изображений из 74 страниц...';
+      status.textContent = 'Удаление водяных знаков...';
       status.className = 'status loading';
       processBtn.disabled = true;
 
@@ -205,37 +217,37 @@
         const fileBuffer = await selectedFile.arrayBuffer();
         const pdfDoc = await PDFLib.PDFDocument.load(fileBuffer);
         const pages = pdfDoc.getPages();
+        const context = pdfDoc.context;
 
         for (let i = 0; i < pages.length; i++) {
           const page = pages[i];
           const { node } = page;
-          const resources = node.Resources();
-          if (!resources) continue;
+          const resourcesRef = node.get(PDFLib.PDFName.of('Resources'));
+          const resources = resourcesRef ? context.lookup(resourcesRef) : null;
+          if (!resources || !(resources instanceof PDFLib.PDFDict)) continue;
 
-          const xObject = resources.lookup(PDFLib.PDFName.of('XObject'));
+          const xObjectRef = resources.get(PDFLib.PDFName.of('XObject'));
+          const xObject = xObjectRef ? context.lookup(xObjectRef) : null;
           const deletedImages = [];
 
           if (xObject && xObject instanceof PDFLib.PDFDict) {
             const keys = xObject.keys();
             for (const key of keys) {
-              const obj = xObject.lookup(key);
-              if (obj instanceof PDFLib.PDFStream) {
-                const subtype = obj.dict.lookup(PDFLib.PDFName.of('Subtype'));
-                
-                if (subtype && subtype.asString() === '/Image') {
-                  const width = obj.dict.lookup(PDFLib.PDFName.of('Width'))?.value;
-                  const height = obj.dict.lookup(PDFLib.PDFName.of('Height'))?.value;
-                  const sMask = obj.dict.lookup(PDFLib.PDFName.of('SMask'));
-                  const mask = obj.dict.lookup(PDFLib.PDFName.of('Mask'));
+              const objRef = xObject.get(key);
+              const obj = context.lookup(objRef);
 
-                  // Критерии фильтрации:
-                  // 1. Наличие маски прозрачности (SMask/Mask)
-                  // 2. Или изображение повторяется на всех страницах (на 2-й и далее странице нет логотипа OCIMF)
-                  const isLogoOnFirstPage = (i === 0 && width > 400 && height < 250); // сохраняем верхний логотип OCIMF
+              if (obj instanceof PDFLib.PDFStream) {
+                const subtype = obj.dict.get(PDFLib.PDFName.of('Subtype'));
+                
+                if (subtype && subtype.toString() === '/Image') {
+                  const width = obj.dict.get(PDFLib.PDFName.of('Width'))?.value;
+                  const height = obj.dict.get(PDFLib.PDFName.of('Height'))?.value;
+
+                  // Сохраняем логотип OCIMF на 1-й странице (он крупный в шапке)
+                  const isLogoOnFirstPage = (i === 0 && width > 400 && height < 250);
 
                   if (!isLogoOnFirstPage) {
-                    // Удаляем водяной знак
-                    deletedImages.push(key.asString().replace('/', ''));
+                    deletedImages.push(key.toString().replace('/', ''));
                     xObject.delete(key);
                   }
                 }
@@ -243,9 +255,14 @@
             }
           }
 
-          // Очищаем вызов удаленных картинок из самого потока страницы
-          const contents = node.lookup(PDFLib.PDFName.of('Contents'));
-          cleanContentStreams(contents, deletedImages);
+          // Очищаем команды Do из Contents
+          const contentsRef = node.get(PDFLib.PDFName.of('Contents'));
+          if (contentsRef) {
+            const newSingleStream = cleanContentStreams(contentsRef, deletedImages, context);
+            if (newSingleStream) {
+              node.set(PDFLib.PDFName.of('Contents'), newSingleStream);
+            }
+          }
         }
 
         const modifiedBytes = await pdfDoc.save();
@@ -260,7 +277,7 @@
         document.body.removeChild(a);
         URL.revokeObjectURL(downloadUrl);
 
-        status.textContent = 'Готово! Фоновые изображения удалены, файл скачан.';
+        status.textContent = 'Готово! Водяные знаки удалены, файл скачан.';
         status.className = 'status success';
       } catch (err) {
         console.error(err);
