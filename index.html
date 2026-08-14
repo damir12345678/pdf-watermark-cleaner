@@ -38,22 +38,13 @@
       border-radius: 16px;
       box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.05);
       width: 100%;
-      max-width: 520px;
+      max-width: 560px;
       text-align: center;
       border: 1px solid var(--border);
     }
 
-    h1 {
-      font-size: 1.5rem;
-      font-weight: 700;
-      margin-bottom: 8px;
-    }
-
-    p {
-      font-size: 0.95rem;
-      color: #64748b;
-      margin-bottom: 24px;
-    }
+    h1 { font-size: 1.5rem; font-weight: 700; margin-bottom: 8px; }
+    p.lead { font-size: 0.95rem; color: #64748b; margin-bottom: 24px; }
 
     .dropzone {
       border: 2px dashed #cbd5e1;
@@ -64,23 +55,11 @@
       background: #f1f5f9;
       margin-bottom: 20px;
     }
+    .dropzone.dragover { border-color: var(--primary); background: #eff6ff; }
+    .dropzone svg { width: 48px; height: 48px; color: var(--primary); margin-bottom: 12px; }
+    input[type="file"] { display: none; }
 
-    .dropzone.dragover {
-      border-color: var(--primary);
-      background: #eff6ff;
-    }
-
-    .dropzone svg {
-      width: 48px;
-      height: 48px;
-      color: var(--primary);
-      margin-bottom: 12px;
-    }
-
-    input[type="file"] {
-      display: none;
-    }
-
+    .btn-row { display: flex; gap: 10px; }
     .btn {
       background: var(--primary);
       color: white;
@@ -90,51 +69,68 @@
       font-weight: 600;
       border-radius: 8px;
       cursor: pointer;
-      width: 100%;
+      flex: 1;
       transition: opacity 0.2s ease;
       display: none;
     }
+    .btn:hover { opacity: 0.9; }
+    .btn.secondary { background: #fff; color: var(--primary); border: 1px solid var(--primary); }
+    .btn:disabled { opacity: 0.5; cursor: default; }
 
-    .btn:hover {
-      opacity: 0.9;
-    }
-
-    .status {
-      margin-top: 16px;
-      font-size: 0.9rem;
-      font-weight: 500;
-      word-break: break-word;
-    }
-
+    .status { margin-top: 16px; font-size: 0.9rem; font-weight: 500; word-break: break-word; }
     .status.success { color: #16a34a; }
     .status.error { color: #dc2626; }
     .status.loading { color: var(--primary); }
+
+    pre.log {
+      display: none;
+      text-align: left;
+      margin-top: 16px;
+      max-height: 260px;
+      overflow: auto;
+      background: #0f172a;
+      color: #e2e8f0;
+      padding: 12px;
+      border-radius: 8px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.78rem;
+      line-height: 1.5;
+      white-space: pre;
+    }
   </style>
 </head>
 <body>
 
   <div class="container">
     <h1>Удаление водяных знаков PDF</h1>
-    <p>Безопасная очистка фоновых меток отчета HVPQ</p>
+    <p class="lead">Очистка фоновых водяных знаков со страниц отчёта HVPQ</p>
 
     <div class="dropzone" id="dropzone">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" 
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
       </svg>
       <div id="dropzone-text"><strong>Выберите файл</strong> или перетащите его сюда</div>
       <input type="file" id="fileInput" accept="application/pdf">
     </div>
 
-    <button id="processBtn" class="btn">Очистить и скачать</button>
+    <div class="btn-row">
+      <button id="analyzeBtn" class="btn secondary">Показать картинки</button>
+      <button id="processBtn" class="btn">Очистить и скачать</button>
+    </div>
     <div id="status" class="status"></div>
+    <pre id="log" class="log"></pre>
   </div>
 
   <script>
+    const { PDFDocument, PDFName, PDFDict, PDFArray } = PDFLib;
+
     const dropzone = document.getElementById('dropzone');
     const fileInput = document.getElementById('fileInput');
     const processBtn = document.getElementById('processBtn');
+    const analyzeBtn = document.getElementById('analyzeBtn');
     const status = document.getElementById('status');
+    const logEl = document.getElementById('log');
     const dropzoneText = document.getElementById('dropzone-text');
 
     let selectedFile = null;
@@ -147,108 +143,251 @@
       dropzone.classList.remove('dragover');
       if (e.dataTransfer.files.length > 0) handleFileSelection(e.dataTransfer.files[0]);
     });
-
     fileInput.addEventListener('change', (e) => {
       if (e.target.files.length > 0) handleFileSelection(e.target.files[0]);
     });
 
     function handleFileSelection(file) {
       if (!file.name.toLowerCase().endsWith('.pdf')) {
-        status.textContent = 'Пожалуйста, выберите PDF-файл.';
-        status.className = 'status error';
+        setStatus('Нужен файл с расширением .pdf', 'error');
         return;
       }
       selectedFile = file;
       dropzoneText.innerHTML = `Выбран файл: <strong>${file.name}</strong>`;
       processBtn.style.display = 'block';
-      status.textContent = '';
+      analyzeBtn.style.display = 'block';
+      logEl.style.display = 'none';
+      logEl.textContent = '';
+      setStatus('', '');
     }
 
-    processBtn.addEventListener('click', async () => {
-      if (!selectedFile) return;
+    function setStatus(text, cls) {
+      status.textContent = text;
+      status.className = 'status' + (cls ? ' ' + cls : '');
+    }
 
-      status.textContent = 'Точечная нейтрализация водяных знаков...';
-      status.className = 'status loading';
-      processBtn.disabled = true;
+    // --- Работа с байтами -----------------------------------------------
+    // TextDecoder('latin1') на деле windows-1252 и портит байты 0x80–0x9F,
+    // поэтому конвертируем вручную: charCode === байт, как в typedArrayFor у pdf-lib.
+    function bytesToStr(bytes) {
+      let out = '';
+      const CHUNK = 0x8000;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        out += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+      }
+      return out;
+    }
 
-      try {
-        const fileBuffer = await selectedFile.arrayBuffer();
-        const pdfDoc = await PDFLib.PDFDocument.load(fileBuffer);
-        const context = pdfDoc.context;
+    function filterOf(stream) {
+      const f = stream.dict.get(PDFName.of('Filter'));
+      if (!f) return null;
+      if (f instanceof PDFArray) {
+        if (f.size() === 0) return null;
+        if (f.size() > 1) return 'MULTI';
+        return f.get(0).toString();
+      }
+      return f.toString();
+    }
 
-        // 1. Собираем уникальные изображения, используемые на 1-й странице (логотип OCIMF)
-        const firstPage = pdfDoc.getPage(0);
-        const firstPageImages = new Set();
-        const firstResRef = firstPage.node.get(PDFLib.PDFName.of('Resources'));
-        const firstRes = firstResRef ? context.lookup(firstResRef) : null;
-        
-        if (firstRes instanceof PDFLib.PDFDict) {
-          const firstXObjRef = firstRes.get(PDFLib.PDFName.of('XObject'));
-          const firstXObj = firstXObjRef ? context.lookup(firstXObjRef) : null;
-          if (firstXObj instanceof PDFLib.PDFDict) {
-            firstXObj.entries().forEach(([key, ref]) => {
-              firstPageImages.add(ref);
-            });
-          }
-        }
+    // Возвращает текст потока или null, если формат не по зубам — тогда поток не трогаем.
+    function readStreamText(stream) {
+      const bytes = stream.getContents();
+      const filter = filterOf(stream);
+      if (!filter) return bytesToStr(bytes);
+      if (filter === '/FlateDecode') {
+        try { return bytesToStr(pako.inflate(bytes)); } catch (e) { return null; }
+      }
+      return null;
+    }
 
-        // 2. Сканируем все косвенные объекты документа
-        const enumeratedEntries = context.enumerateIndirectObjects();
+    function isStream(obj) {
+      return !!obj && obj.dict instanceof PDFDict && typeof obj.getContents === 'function';
+    }
 
-        for (const [ref, obj] of enumeratedEntries) {
-          if (obj instanceof PDFLib.PDFStream) {
-            const subtype = obj.dict.get(PDFLib.PDFName.of('Subtype'));
+    function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
-            if (subtype && subtype.toString() === '/Image') {
-              // Если это логотип первой страницы — пропускаем его
-              if (firstPageImages.has(ref)) {
-                continue;
-              }
+    // Resources может быть унаследован от узла Pages — идём вверх по /Parent.
+    function inheritedValue(node, key, context) {
+      let n = node;
+      for (let depth = 0; n && depth < 64; depth++) {
+        const v = n.get(PDFName.of(key));
+        if (v) return v;
+        const parent = n.get(PDFName.of('Parent'));
+        n = parent ? context.lookup(parent) : null;
+      }
+      return null;
+    }
 
-              const width = obj.dict.get(PDFLib.PDFName.of('Width'))?.value || 0;
-              const height = obj.dict.get(PDFLib.PDFName.of('Height'))?.value || 0;
+    // --- Инвентаризация картинок ----------------------------------------
+    // Отпечаток по размерам и длине потока: ловит водяной знак, даже если он
+    // продублирован отдельным объектом на каждой странице.
+    function collectImages(pdfDoc) {
+      const pages = pdfDoc.getPages();
+      const context = pdfDoc.context;
+      const perPage = [];
+      const pagesByPrint = new Map();
 
-              // Защищаем векторные/битовые схемы танков и палуб (широкие схемы)
-              const isTechnicalDrawing = (width >= 500 && height >= 150);
+      pages.forEach((page, idx) => {
+        const entries = [];
+        const resources = context.lookup(inheritedValue(page.node, 'Resources', context));
+        if (resources instanceof PDFDict) {
+          const xObject = context.lookup(resources.get(PDFName.of('XObject')));
+          if (xObject instanceof PDFDict) {
+            for (const key of xObject.keys()) {
+              const obj = context.lookup(xObject.get(key));
+              if (!isStream(obj)) continue;
+              const subtype = obj.dict.get(PDFName.of('Subtype'));
+              if (!subtype || subtype.toString() !== '/Image') continue;
 
-              if (!isTechnicalDrawing) {
-                // Превращаем сам объект водяного знака в полностью прозрачный 1x1 пиксель
-                // Это удаляет водяной знак везде, не ломая поток команд страниц и структуру PDF
-                obj.dict.set(PDFLib.PDFName.of('Width'), PDFLib.PDFNumber.of(1));
-                obj.dict.set(PDFLib.PDFName.of('Height'), PDFLib.PDFNumber.of(1));
-                obj.dict.set(PDFLib.PDFName.of('BitsPerComponent'), PDFLib.PDFNumber.of(8));
-                obj.dict.set(PDFLib.PDFName.of('ColorSpace'), PDFLib.PDFName.of('DeviceGray'));
-                obj.dict.delete(PDFLib.PDFName.of('SMask'));
-                obj.dict.delete(PDFLib.PDFName.of('Mask'));
-                obj.dict.delete(PDFLib.PDFName.of('Filter'));
+              const width = obj.dict.get(PDFName.of('Width'))?.value ?? 0;
+              const height = obj.dict.get(PDFName.of('Height'))?.value ?? 0;
+              const length = obj.dict.get(PDFName.of('Length'))?.value ?? obj.getContents().length;
+              const print = `${width}x${height}:${length}`;
 
-                // Байт 255 = белый пиксель (или 0 = прозрачный в маске)
-                obj.contents = new Uint8Array([255]);
-              }
+              if (!pagesByPrint.has(print)) pagesByPrint.set(print, new Set());
+              pagesByPrint.get(print).add(idx);
+
+              entries.push({ name: key.toString().slice(1), width, height, print });
             }
           }
         }
+        perPage.push(entries);
+      });
+
+      return { perPage, pagesByPrint };
+    }
+
+    function decide(entry, pageIndex, stats, opts) {
+      if (opts.keepFirst && pageIndex === 0) return { remove: false, why: 'первая страница' };
+      const occurrences = stats.pagesByPrint.get(entry.print).size;
+      if (occurrences >= opts.minPages) return { remove: true, why: `повторяется на ${occurrences} стр.` };
+      if (opts.keepUnique) return { remove: false, why: 'уникальна для страницы' };
+      return { remove: true, why: 'уникальна, но защита отключена' };
+    }
+
+    // Правила зашиты: первая страница неприкосновенна, уникальные картинки
+    // (схемы, фото, сканы) остаются, удаляется только то, что повторяется
+    // минимум на 5 страницах.
+    const OPTS = { keepFirst: true, keepUnique: true, minPages: 5 };
+
+    // --- Разбор без изменений -------------------------------------------
+    analyzeBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      setStatus('Читаю документ…', 'loading');
+      analyzeBtn.disabled = true;
+      try {
+        const pdfDoc = await PDFDocument.load(await selectedFile.arrayBuffer());
+        const stats = collectImages(pdfDoc);
+        const opts = OPTS;
+        const lines = [];
+        stats.perPage.forEach((entries, idx) => {
+          if (entries.length === 0) return;
+          lines.push(`Стр. ${idx + 1}`);
+          for (const entry of entries) {
+            const d = decide(entry, idx, stats, opts);
+            lines.push(`   /${entry.name}  ${entry.width}×${entry.height}px  → ${d.remove ? 'УДАЛИТЬ' : 'оставить'} (${d.why})`);
+          }
+        });
+        logEl.textContent = lines.length ? lines.join('\n') : 'Растровых картинок в документе нет.';
+        logEl.style.display = 'block';
+        setStatus('Разбор готов. Файл не изменён.', 'success');
+      } catch (err) {
+        console.error(err);
+        setStatus('Ошибка: ' + err.message, 'error');
+      } finally {
+        analyzeBtn.disabled = false;
+      }
+    });
+
+    // --- Очистка ---------------------------------------------------------
+    processBtn.addEventListener('click', async () => {
+      if (!selectedFile) return;
+      setStatus('Очищаю документ…', 'loading');
+      processBtn.disabled = true;
+      analyzeBtn.disabled = true;
+
+      try {
+        const pdfDoc = await PDFDocument.load(await selectedFile.arrayBuffer());
+        const context = pdfDoc.context;
+        const pages = pdfDoc.getPages();
+        const stats = collectImages(pdfDoc);
+        const opts = OPTS;
+        const report = [];
+        let removedTotal = 0;
+
+        pages.forEach((page, idx) => {
+          const node = page.node;
+          const entries = stats.perPage[idx];
+          const toRemove = entries.filter((e) => decide(e, idx, stats, opts).remove);
+          if (toRemove.length === 0) return;
+
+          const resources = context.lookup(inheritedValue(node, 'Resources', context));
+          if (!(resources instanceof PDFDict)) return;
+          const xObject = context.lookup(resources.get(PDFName.of('XObject')));
+          if (!(xObject instanceof PDFDict)) return;
+
+          // Клонируем Resources и XObject: исходные словари общие для всех
+          // страниц, правка на месте вырезала бы картинку и с остальных.
+          const newResources = resources.clone(context);
+          const newXObject = xObject.clone(context);
+          for (const entry of toRemove) {
+            newXObject.delete(PDFName.of(entry.name));
+          }
+          newResources.set(PDFName.of('XObject'), context.register(newXObject));
+          node.set(PDFName.of('Resources'), context.register(newResources));
+
+          // Убираем сами вызовы отрисовки, тоже в своей копии потока.
+          const contentsEntry = node.get(PDFName.of('Contents'));
+          const contents = context.lookup(contentsEntry);
+          const parts = contents instanceof PDFArray ? contents.asArray() : [contentsEntry];
+          const rebuilt = [];
+          let touched = false;
+
+          for (const part of parts) {
+            const stream = context.lookup(part);
+            if (!isStream(stream)) { rebuilt.push(part); continue; }
+            const text = readStreamText(stream);
+            if (text === null) { rebuilt.push(part); continue; }
+
+            let modified = text;
+            for (const entry of toRemove) {
+              modified = modified.replace(new RegExp(`\\/${escapeRe(entry.name)}\\s+Do`, 'g'), ' ');
+            }
+            if (modified === text) { rebuilt.push(part); continue; }
+
+            // flateStream сжимает сам — подавать сюда pako.deflate нельзя,
+            // получится двойное сжатие и пустая страница. Поток обязан быть
+            // косвенным объектом, поэтому register().
+            rebuilt.push(context.register(context.flateStream(modified)));
+            touched = true;
+          }
+
+          if (touched) node.set(PDFName.of('Contents'), context.obj(rebuilt));
+
+          removedTotal += toRemove.length;
+          report.push(`Стр. ${idx + 1}: удалено ${toRemove.length} — ${toRemove.map((e) => '/' + e.name).join(', ')}`);
+        });
 
         const modifiedBytes = await pdfDoc.save();
         const blob = new Blob([modifiedBytes], { type: 'application/pdf' });
         const downloadUrl = URL.createObjectURL(blob);
-
         const a = document.createElement('a');
         a.href = downloadUrl;
-        a.download = selectedFile.name.replace('.pdf', '_cleaned.pdf');
+        a.download = selectedFile.name.replace(/\.pdf$/i, '') + '_cleaned.pdf';
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
         URL.revokeObjectURL(downloadUrl);
 
-        status.textContent = 'Успешно! Все страницы, схемы и логотип сохранены без водяных знаков.';
-        status.className = 'status success';
+        logEl.textContent = report.length ? report.join('\n') : 'Под правила удаления ничего не попало.';
+        logEl.style.display = 'block';
+        setStatus(`Готово. Удалено объектов: ${removedTotal}. Файл скачан.`, 'success');
       } catch (err) {
         console.error(err);
-        status.textContent = 'Ошибка обработки: ' + err.message;
-        status.className = 'status error';
+        setStatus('Ошибка: ' + err.message, 'error');
       } finally {
         processBtn.disabled = false;
+        analyzeBtn.disabled = false;
       }
     });
   </script>
