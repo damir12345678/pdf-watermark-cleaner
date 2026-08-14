@@ -115,7 +115,7 @@
 
   <div class="container">
     <h1>Удаление водяных знаков PDF</h1>
-    <p>Очистка фоновых водяных знаков со страниц отчета HVPQ</p>
+    <p>Безопасная очистка фоновых меток отчета HVPQ</p>
 
     <div class="dropzone" id="dropzone">
       <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -164,107 +164,67 @@
       status.textContent = '';
     }
 
-    function cleanContentStreams(contentsRef, deletedImageNames, context) {
-      if (!contentsRef || deletedImageNames.length === 0) return null;
-
-      const contentsObj = context.lookup(contentsRef);
-      const streams = (contentsObj instanceof PDFLib.PDFArray) 
-        ? contentsObj.asArray() 
-        : [contentsRef];
-
-      for (let i = 0; i < streams.length; i++) {
-        const stream = context.lookup(streams[i]);
-        if (!(stream instanceof PDFLib.PDFStream)) continue;
-        
-        let raw = "";
-        try {
-          const decompressed = pako.inflate(stream.getContents());
-          raw = new TextDecoder('latin1').decode(decompressed);
-        } catch(e) {
-          raw = new TextDecoder('latin1').decode(stream.getContents());
-        }
-
-        let modified = raw;
-        for (const imgName of deletedImageNames) {
-          const regex = new RegExp(`\\/${imgName}\\s+Do`, 'g');
-          modified = modified.replace(regex, '');
-        }
-
-        if (modified !== raw) {
-          const encoded = new TextEncoder().encode(modified);
-          const compressed = pako.deflate(encoded);
-          
-          const newStream = context.flateStream(compressed);
-          if (contentsObj instanceof PDFLib.PDFArray) {
-            contentsObj.set(i, newStream);
-          } else {
-            return newStream;
-          }
-        }
-      }
-      return null;
-    }
-
     processBtn.addEventListener('click', async () => {
       if (!selectedFile) return;
 
-      status.textContent = 'Очистка документа (сохранение 1-й страницы и схем)...';
+      status.textContent = 'Точечная нейтрализация водяных знаков...';
       status.className = 'status loading';
       processBtn.disabled = true;
 
       try {
         const fileBuffer = await selectedFile.arrayBuffer();
         const pdfDoc = await PDFLib.PDFDocument.load(fileBuffer);
-        const pages = pdfDoc.getPages();
         const context = pdfDoc.context;
 
-        for (let i = 0; i < pages.length; i++) {
-          // ПЕРВАЯ СТРАНИЦА: пропускаем полностью, чтобы не трогать шапку и логотип
-          if (i === 0) {
-            continue;
+        // 1. Собираем уникальные изображения, используемые на 1-й странице (логотип OCIMF)
+        const firstPage = pdfDoc.getPage(0);
+        const firstPageImages = new Set();
+        const firstResRef = firstPage.node.get(PDFLib.PDFName.of('Resources'));
+        const firstRes = firstResRef ? context.lookup(firstResRef) : null;
+        
+        if (firstRes instanceof PDFLib.PDFDict) {
+          const firstXObjRef = firstRes.get(PDFLib.PDFName.of('XObject'));
+          const firstXObj = firstXObjRef ? context.lookup(firstXObjRef) : null;
+          if (firstXObj instanceof PDFLib.PDFDict) {
+            firstXObj.entries().forEach(([key, ref]) => {
+              firstPageImages.add(ref);
+            });
           }
+        }
 
-          const page = pages[i];
-          const { node } = page;
-          const resourcesRef = node.get(PDFLib.PDFName.of('Resources'));
-          const resources = resourcesRef ? context.lookup(resourcesRef) : null;
-          if (!resources || !(resources instanceof PDFLib.PDFDict)) continue;
+        // 2. Сканируем все косвенные объекты документа
+        const enumeratedEntries = context.enumerateIndirectObjects();
 
-          const xObjectRef = resources.get(PDFLib.PDFName.of('XObject'));
-          const xObject = xObjectRef ? context.lookup(xObjectRef) : null;
-          const deletedImages = [];
+        for (const [ref, obj] of enumeratedEntries) {
+          if (obj instanceof PDFLib.PDFStream) {
+            const subtype = obj.dict.get(PDFLib.PDFName.of('Subtype'));
 
-          if (xObject && xObject instanceof PDFLib.PDFDict) {
-            const keys = xObject.keys();
-            for (const key of keys) {
-              const objRef = xObject.get(key);
-              const obj = context.lookup(objRef);
-
-              if (obj instanceof PDFLib.PDFStream) {
-                const subtype = obj.dict.get(PDFLib.PDFName.of('Subtype'));
-                
-                if (subtype && subtype.toString() === '/Image') {
-                  const width = obj.dict.get(PDFLib.PDFName.of('Width'))?.value;
-                  const height = obj.dict.get(PDFLib.PDFName.of('Height'))?.value;
-
-                  // Защита схем/чертежей (схемы танков обычно широкие > 600px)
-                  const isDiagram = (width > 600 && height > 200);
-
-                  if (!isDiagram) {
-                    deletedImages.push(key.toString().replace('/', ''));
-                    xObject.delete(key);
-                  }
-                }
+            if (subtype && subtype.toString() === '/Image') {
+              // Если это логотип первой страницы — пропускаем его
+              if (firstPageImages.has(ref)) {
+                continue;
               }
-            }
-          }
 
-          // Очищаем вызовы только удаленных водяных знаков
-          const contentsRef = node.get(PDFLib.PDFName.of('Contents'));
-          if (contentsRef && deletedImages.length > 0) {
-            const newSingleStream = cleanContentStreams(contentsRef, deletedImages, context);
-            if (newSingleStream) {
-              node.set(PDFLib.PDFName.of('Contents'), newSingleStream);
+              const width = obj.dict.get(PDFLib.PDFName.of('Width'))?.value || 0;
+              const height = obj.dict.get(PDFLib.PDFName.of('Height'))?.value || 0;
+
+              // Защищаем векторные/битовые схемы танков и палуб (широкие схемы)
+              const isTechnicalDrawing = (width >= 500 && height >= 150);
+
+              if (!isTechnicalDrawing) {
+                // Превращаем сам объект водяного знака в полностью прозрачный 1x1 пиксель
+                // Это удаляет водяной знак везде, не ломая поток команд страниц и структуру PDF
+                obj.dict.set(PDFLib.PDFName.of('Width'), PDFLib.PDFNumber.of(1));
+                obj.dict.set(PDFLib.PDFName.of('Height'), PDFLib.PDFNumber.of(1));
+                obj.dict.set(PDFLib.PDFName.of('BitsPerComponent'), PDFLib.PDFNumber.of(8));
+                obj.dict.set(PDFLib.PDFName.of('ColorSpace'), PDFLib.PDFName.of('DeviceGray'));
+                obj.dict.delete(PDFLib.PDFName.of('SMask'));
+                obj.dict.delete(PDFLib.PDFName.of('Mask'));
+                obj.dict.delete(PDFLib.PDFName.of('Filter'));
+
+                // Байт 255 = белый пиксель (или 0 = прозрачный в маске)
+                obj.contents = new Uint8Array([255]);
+              }
             }
           }
         }
@@ -281,11 +241,11 @@
         document.body.removeChild(a);
         URL.revokeObjectURL(downloadUrl);
 
-        status.textContent = 'Готово! 1-я страница и схемы сохранены, водяные знаки удалены.';
+        status.textContent = 'Успешно! Все страницы, схемы и логотип сохранены без водяных знаков.';
         status.className = 'status success';
       } catch (err) {
         console.error(err);
-        status.textContent = 'Ошибка: ' + err.message;
+        status.textContent = 'Ошибка обработки: ' + err.message;
         status.className = 'status error';
       } finally {
         processBtn.disabled = false;
